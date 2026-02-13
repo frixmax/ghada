@@ -17,7 +17,7 @@ print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
 # Configuration
 PORT = int(os.environ.get('PORT', 10000))
-DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', "VOTRE_WEBHOOK_ICI")
+DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', "https://discord.com/api/webhooks/1471764024797433872/WpHl_7qk5u9mocNYd2LbnFBp0qXbff3RXAIsrKVNXspSQJHJOp_e4_XhWOaq4jrSjKtS")
 DOMAINS_FILE = '/app/domains.txt'
 CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL', 90))  # 90s pour 12 logs
 BATCH_SIZE = 200  # Réduit à 200 pour éviter surcharge
