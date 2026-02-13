@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  ct-monitor:
+    build: .
+    container_name: certstream-monitor
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+    volumes:
+      - ./domains.txt:/app/domains.txt:ro
+    environment:
+      - TZ=UTC
+      - PORT=10000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - monitor-net
+
+networks:
+  monitor-net:
+    driver: bridge

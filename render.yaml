@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: certstream-monitor
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: DISCORD_WEBHOOK
+        sync: false  # À configurer manuellement dans le dashboard Render
+      - key: PYTHON_VERSION
+        value: 3.11
