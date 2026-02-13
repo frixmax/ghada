@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Monitoring Certificate Transparency - API Google directe
-Plus fiable que CertStream
+Monitoring Certificate Transparency - TOUS les logs Google
+Version complète avec tous les endpoints
 """
 
 import requests
@@ -12,28 +12,37 @@ import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-print("=== MONITORING CT via Google API ===")
+print("=== MONITORING CT - TOUS LES LOGS GOOGLE ===")
 print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
 # Configuration
 PORT = int(os.environ.get('PORT', 10000))
-DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', "https://discord.com/api/webhooks/1471764024797433872/WpHl_7qk5u9mocNYd2LbnFBp0qXbff3RXAIsrKVNXspSQJHJOp_e4_XhWOaq4jrSjKtS")
+DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', "VOTRE_WEBHOOK_ICI")
 DOMAINS_FILE = '/app/domains.txt'
-CHECK_INTERVAL = 60  # Vérifier toutes les 60 secondes
-BATCH_SIZE = 256  # Nombre d'entrées à récupérer par requête
+CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL', 60))  # Configurable
+BATCH_SIZE = 256
 
-# Logs CT Google à surveiller (les plus actifs en 2026)
+# TOUS les logs Google Certificate Transparency (2026)
 CT_LOGS = [
-    {
-        "name": "Google Argon 2026h1",
-        "url": "https://ct.googleapis.com/logs/us1/argon2026h1",
-        "enabled": True
-    },
-    {
-        "name": "Google Solera 2026h1",
-        "url": "https://ct.googleapis.com/logs/eu1/solera2026h1",
-        "enabled": True
-    }
+    # US Logs
+    {"name": "Argon 2026h1", "url": "https://ct.googleapis.com/logs/us1/argon2026h1", "enabled": True},
+    {"name": "Argon 2026h2", "url": "https://ct.googleapis.com/logs/us1/argon2026h2", "enabled": True},
+    
+    # EU Logs  
+    {"name": "Solera 2026h1", "url": "https://ct.googleapis.com/logs/eu1/solera2026h1", "enabled": True},
+    {"name": "Solera 2026h2", "url": "https://ct.googleapis.com/logs/eu1/solera2026h2", "enabled": True},
+    
+    # 2025 Logs (encore actifs)
+    {"name": "Argon 2025h1", "url": "https://ct.googleapis.com/logs/us1/argon2025h1", "enabled": False},
+    {"name": "Argon 2025h2", "url": "https://ct.googleapis.com/logs/us1/argon2025h2", "enabled": False},
+    {"name": "Solera 2025h1", "url": "https://ct.googleapis.com/logs/eu1/solera2025h1", "enabled": False},
+    {"name": "Solera 2025h2", "url": "https://ct.googleapis.com/logs/eu1/solera2025h2", "enabled": False},
+    
+    # Trust Asia Logs
+    {"name": "TrustAsia CT2025", "url": "https://ct.trustasia.com/log2025", "enabled": False},
+    
+    # Cloudflare Logs
+    {"name": "Cloudflare Nimbus 2026", "url": "https://ct.cloudflare.com/logs/nimbus2026", "enabled": False},
 ]
 
 # Stats
@@ -43,8 +52,15 @@ stats = {
     'dernière_alerte': None,
     'démarrage': datetime.utcnow(),
     'dernière_vérification': None,
-    'positions': {}
+    'positions': {},
+    'logs_actifs': 0,
+    'logs_en_erreur': {},
+    'duplicates_évités': 0
 }
+
+# Cache pour éviter les duplicates
+seen_certificates = set()
+CACHE_MAX_SIZE = 10000
 
 # Chargement des domaines
 try:
@@ -67,6 +83,10 @@ if "discord.com/api/webhooks" not in DISCORD_WEBHOOK:
     exit(1)
 print(f"✓ Webhook Discord configuré")
 
+# Compter les logs actifs
+stats['logs_actifs'] = sum(1 for log in CT_LOGS if log['enabled'])
+print(f"✓ {stats['logs_actifs']} logs CT actifs sur {len(CT_LOGS)} disponibles")
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Handler HTTP pour health checks"""
     
@@ -86,6 +106,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 'uptime_seconds': int(uptime),
                 'certificats_analysés': stats['certificats_analysés'],
                 'alertes_envoyées': stats['alertes_envoyées'],
+                'duplicates_évités': stats['duplicates_évités'],
+                'logs_actifs': stats['logs_actifs'],
+                'logs_en_erreur': stats['logs_en_erreur'],
                 'dernière_alerte': stats['dernière_alerte'].isoformat() if stats['dernière_alerte'] else None,
                 'dernière_vérification': stats['dernière_vérification'].isoformat() if stats['dernière_vérification'] else None,
                 'timestamp': datetime.utcnow().isoformat(),
@@ -103,14 +126,19 @@ def start_http_server():
     print(f"✓ Serveur HTTP démarré sur le port {PORT}")
     server.serve_forever()
 
-def get_sth(log_url):
-    """Récupère le Signed Tree Head (taille actuelle du log)"""
+def get_sth(log_url, log_name):
+    """Récupère le Signed Tree Head"""
     try:
         response = requests.get(f"{log_url}/ct/v1/get-sth", timeout=10)
         response.raise_for_status()
+        
+        # Réinitialiser le compteur d'erreurs
+        if log_name in stats['logs_en_erreur']:
+            del stats['logs_en_erreur'][log_name]
+        
         return response.json()['tree_size']
     except Exception as e:
-        print(f"✗ Erreur STH {log_url}: {e}")
+        stats['logs_en_erreur'][log_name] = str(e)
         return None
 
 def get_entries(log_url, start, end):
@@ -124,24 +152,25 @@ def get_entries(log_url, start, end):
         response.raise_for_status()
         return response.json().get('entries', [])
     except Exception as e:
-        print(f"✗ Erreur entrées {log_url}: {e}")
         return []
+
+def generate_cert_hash(entry):
+    """Génère un hash pour détecter les duplicates"""
+    try:
+        leaf = entry.get('leaf_input', '')
+        return hash(leaf)
+    except:
+        return None
 
 def parse_certificate(entry):
     """Parse un certificat pour extraire les domaines"""
     try:
-        # Le certificat est dans leaf_input encodé en base64
         from base64 import b64decode
         
         leaf_input = entry.get('leaf_input', '')
         extra_data = entry.get('extra_data', '')
         
-        # Conversion simplifiée - recherche de patterns de domaines
-        # Pour une version complète, il faudrait parser le X.509
-        
         domains = []
-        
-        # Recherche dans les données brutes
         data_str = str(leaf_input) + str(extra_data)
         
         for target in targets:
@@ -177,7 +206,7 @@ def send_alert(matched_domains, log_name):
                     "inline": True
                 }
             ],
-            "footer": {"text": "CT Monitor (Google API)"},
+            "footer": {"text": "CT Monitor - Multi-logs"},
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -187,7 +216,7 @@ def send_alert(matched_domains, log_name):
         
         stats['alertes_envoyées'] += 1
         stats['dernière_alerte'] = datetime.utcnow()
-        print(f"✓ Alerte envoyée: {len(matched_domains)} domaine(s)")
+        print(f"✓ Alerte envoyée: {len(matched_domains)} domaine(s) depuis {log_name}")
         
     except Exception as e:
         print(f"✗ Erreur Discord: {e}")
@@ -197,48 +226,56 @@ def monitor_log(log_config):
     log_name = log_config['name']
     log_url = log_config['url']
     
-    # Initialiser la position si nécessaire
+    # Initialiser la position
     if log_name not in stats['positions']:
-        tree_size = get_sth(log_url)
+        tree_size = get_sth(log_url, log_name)
         if tree_size:
-            # Commencer aux 1000 dernières entrées
-            stats['positions'][log_name] = max(0, tree_size - 1000)
+            stats['positions'][log_name] = max(0, tree_size - 500)
             print(f"✓ Init {log_name}: position {stats['positions'][log_name]}")
         else:
             return
     
     # Récupérer la taille actuelle
-    tree_size = get_sth(log_url)
+    tree_size = get_sth(log_url, log_name)
     if not tree_size:
         return
     
     current_pos = stats['positions'][log_name]
     
     if current_pos >= tree_size:
-        return  # Rien de nouveau
+        return
     
-    # Limiter le nombre d'entrées à traiter
     end_pos = min(current_pos + BATCH_SIZE, tree_size)
     
-    print(f"🔍 {log_name}: vérification {current_pos} → {end_pos - 1}")
+    print(f"🔍 {log_name}: {current_pos} → {end_pos - 1}")
     
-    # Récupérer les entrées
     entries = get_entries(log_url, current_pos, end_pos - 1)
     
     for entry in entries:
         stats['certificats_analysés'] += 1
         
-        # Parser pour trouver des domaines matchés
+        # Vérifier les duplicates
+        cert_hash = generate_cert_hash(entry)
+        if cert_hash and cert_hash in seen_certificates:
+            stats['duplicates_évités'] += 1
+            continue
+        
+        # Ajouter au cache
+        if cert_hash:
+            seen_certificates.add(cert_hash)
+            # Limiter la taille du cache
+            if len(seen_certificates) > CACHE_MAX_SIZE:
+                seen_certificates.pop()
+        
+        # Parser et chercher matches
         matched = parse_certificate(entry)
         
         if matched:
             send_alert(matched, log_name)
     
-    # Mettre à jour la position
     stats['positions'][log_name] = end_pos
     
-    # Log de progression
-    if stats['certificats_analysés'] % 100 == 0:
+    if stats['certificats_analysés'] % 500 == 0:
         print(f"📊 {stats['certificats_analysés']} certificats analysés")
 
 # Démarrer le serveur HTTP
@@ -246,7 +283,7 @@ http_thread = threading.Thread(target=start_http_server, daemon=True)
 http_thread.start()
 time.sleep(1)
 
-print("\n🔄 Démarrage de la surveillance...")
+print(f"\n🔄 Surveillance toutes les {CHECK_INTERVAL}s...")
 
 # Boucle principale
 while True:
@@ -257,7 +294,6 @@ while True:
             if log_config['enabled']:
                 monitor_log(log_config)
         
-        # Attendre avant la prochaine vérification
         time.sleep(CHECK_INTERVAL)
         
     except KeyboardInterrupt:
