@@ -22,16 +22,16 @@ DOMAINS_FILE = '/app/domains.txt'
 CHECK_INTERVAL = 60  # Vérifier toutes les 60 secondes
 BATCH_SIZE = 256  # Nombre d'entrées à récupérer par requête
 
-# Logs CT Google à surveiller (les plus actifs)
+# Logs CT Google à surveiller (les plus actifs en 2026)
 CT_LOGS = [
     {
-        "name": "Google Argon 2026",
+        "name": "Google Argon 2026h1",
         "url": "https://ct.googleapis.com/logs/us1/argon2026h1",
         "enabled": True
     },
     {
-        "name": "Google Xenon 2026", 
-        "url": "https://ct.googleapis.com/logs/us1/xenon2026h1",
+        "name": "Google Solera 2026h1",
+        "url": "https://ct.googleapis.com/logs/eu1/solera2026h1",
         "enabled": True
     }
 ]
