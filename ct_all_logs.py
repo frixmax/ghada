@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Monitoring Certificate Transparency - VERSION CORRIGEE AVEC PRECERT
-Gestion correcte des X509Entry ET PreCertificate
+Monitoring Certificate Transparency - VERSION LISTE COMPLETE DISCORD
+Envoie la liste complete des domaines (meme si 300+)
 """
 
 import requests
@@ -17,7 +17,7 @@ from cryptography.hazmat.backends import default_backend
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 print("=" * 80)
-print("MONITORING CT - VERSION CORRIGEE (X509 + PreCert)")
+print("MONITORING CT - VERSION LISTE COMPLETE")
 print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print("=" * 80)
 
@@ -28,11 +28,11 @@ DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK',
 DOMAINS_FILE = '/app/domains.txt'
 
 # PARAMETRES OPTIMISES
-CHECK_INTERVAL = 60              # 60s
-BATCH_SIZE = 300                 # Batches moyens
-MAX_BATCHES_PER_CYCLE = 20       # 20 batches max
-PARALLEL_LOGS = 8                # 8 logs paralleles
-CACHE_MAX_SIZE = 200000          
+CHECK_INTERVAL = 60
+BATCH_SIZE = 300
+MAX_BATCHES_PER_CYCLE = 20
+PARALLEL_LOGS = 8
+CACHE_MAX_SIZE = 200000
 BACKLOG_WARNING_THRESHOLD = 1000
 TIMEOUT_PER_LOG = 180
 
@@ -193,22 +193,17 @@ def parse_certificate(entry):
         if len(leaf_bytes) < 12:
             return []
         
-        # Lire LogEntryType (bytes 10-11, big-endian uint16)
-        # 0 = X509Entry
-        # 1 = PreCertificate
         log_entry_type = int.from_bytes(leaf_bytes[10:12], 'big')
         
         cert_der = None
         
         if log_entry_type == 0:
-            # X509Entry - certificat complet dans leaf_input
             with stats_lock:
                 stats['x509_count'] += 1
             
             if len(leaf_bytes) < 15:
                 return []
             
-            # Lire la longueur du certificat (3 bytes)
             cert_length = int.from_bytes(leaf_bytes[12:15], 'big')
             cert_start = 15
             cert_end = cert_start + cert_length
@@ -217,14 +212,12 @@ def parse_certificate(entry):
                 cert_der = leaf_bytes[cert_start:cert_end]
         
         elif log_entry_type == 1:
-            # PreCertificate - certificat dans extra_data
             with stats_lock:
                 stats['precert_count'] += 1
             
             try:
                 extra_data = base64.b64decode(entry.get('extra_data', ''))
                 if len(extra_data) > 3:
-                    # Les 3 premiers bytes = longueur du certificat
                     cert_length = int.from_bytes(extra_data[0:3], 'big')
                     if len(extra_data) >= 3 + cert_length:
                         cert_der = extra_data[3:3+cert_length]
@@ -236,12 +229,10 @@ def parse_certificate(entry):
                 stats['parse_errors'] += 1
             return []
         
-        # Parser le certificat X.509
         cert = x509.load_der_x509_certificate(cert_der, default_backend())
         
         all_domains = set()
         
-        # Common Name
         try:
             cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
             if cn:
@@ -249,7 +240,6 @@ def parse_certificate(entry):
         except:
             pass
         
-        # SANs (Subject Alternative Names) - LE PLUS IMPORTANT
         try:
             san_ext = cert.extensions.get_extension_for_oid(
                 x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
@@ -260,11 +250,9 @@ def parse_certificate(entry):
         except:
             pass
         
-        # Match avec targets
         matched = []
         for domain in all_domains:
             for target in targets:
-                # Match exact ou sous-domaine
                 if domain == target or domain.endswith('.' + target):
                     matched.append(domain)
                     break
@@ -277,7 +265,7 @@ def parse_certificate(entry):
         return []
 
 def send_alert(matched_domains, log_name):
-    """Envoie alerte Discord"""
+    """Envoie alerte Discord avec LISTE COMPLETE - Messages multiples si necessaire"""
     try:
         unique_domains = sorted(set(matched_domains))
         
@@ -291,42 +279,107 @@ def send_alert(matched_domains, log_name):
                     by_base_domain[target].append(domain)
                     break
         
-        # Construire description
-        description_parts = []
+        # CONSTRUIRE LA LISTE COMPLETE
+        full_list = []
         for base, subs in sorted(by_base_domain.items()):
-            description_parts.append(f"**{base}** ({len(subs)})")
-            for sub in sorted(subs)[:5]:
-                description_parts.append(f"  - `{sub}`")
-            if len(subs) > 5:
-                description_parts.append(f"  ... +{len(subs)-5} autres")
+            full_list.append(f"\n**{base}** ({len(subs)} sous-domaines)")
+            for sub in sorted(subs):
+                full_list.append(f"`{sub}`")
         
-        description = "\n".join(description_parts[:30])
+        full_text = "\n".join(full_list)
         
-        if len(description_parts) > 30:
-            description += f"\n\n... et {len(description_parts)-30} lignes supplementaires"
+        # Discord limite: 4096 caracteres par embed
+        # Si trop long, decouper en plusieurs messages
+        MAX_LENGTH = 3900  # Marge de securite
         
-        embed = {
-            "title": "[ALERTE] Nouveaux certificats SSL",
-            "description": description,
-            "color": 0xff0000,
-            "fields": [
-                {"name": "Total domaines", "value": str(len(unique_domains)), "inline": True},
-                {"name": "Domaines principaux", "value": str(len(by_base_domain)), "inline": True},
-                {"name": "Source", "value": log_name, "inline": True}
-            ],
-            "footer": {"text": "CT Monitor"},
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        messages_to_send = []
         
-        payload = {"embeds": [embed]}
-        response = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-        response.raise_for_status()
+        if len(full_text) <= MAX_LENGTH:
+            # UN SEUL MESSAGE
+            embed = {
+                "title": f"[ALERTE] {len(unique_domains)} nouveaux certificats SSL",
+                "description": full_text,
+                "color": 0xff0000,
+                "fields": [
+                    {"name": "Domaines principaux", "value": str(len(by_base_domain)), "inline": True},
+                    {"name": "Source", "value": log_name, "inline": True}
+                ],
+                "footer": {"text": "CT Monitor"},
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            messages_to_send.append({"embeds": [embed]})
+        
+        else:
+            # PLUSIEURS MESSAGES
+            # Message 1: Header avec resume
+            header_embed = {
+                "title": f"[ALERTE] {len(unique_domains)} nouveaux certificats SSL",
+                "description": f"**LISTE COMPLETE EN PLUSIEURS PARTIES**\n\nDomaines principaux detectes: {len(by_base_domain)}\nSource: {log_name}\n\n" + 
+                               "\n".join([f"- **{base}**: {len(subs)} sous-domaines" for base, subs in sorted(by_base_domain.items())]),
+                "color": 0xff0000,
+                "footer": {"text": "CT Monitor - Partie 1"},
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            messages_to_send.append({"embeds": [header_embed]})
+            
+            # Messages suivants: Listes completes par domaine principal
+            part_number = 2
+            for base, subs in sorted(by_base_domain.items()):
+                domain_text = f"**{base}** ({len(subs)} sous-domaines)\n\n"
+                domain_text += "\n".join([f"`{sub}`" for sub in sorted(subs)])
+                
+                # Si un domaine seul depasse la limite, le decouper
+                if len(domain_text) > MAX_LENGTH:
+                    chunks = []
+                    current_chunk = f"**{base}** (suite)\n\n"
+                    
+                    for sub in sorted(subs):
+                        line = f"`{sub}`\n"
+                        if len(current_chunk) + len(line) > MAX_LENGTH:
+                            chunks.append(current_chunk)
+                            current_chunk = f"**{base}** (suite)\n\n" + line
+                        else:
+                            current_chunk += line
+                    
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    
+                    for chunk in chunks:
+                        embed = {
+                            "description": chunk,
+                            "color": 0xff8800,
+                            "footer": {"text": f"CT Monitor - Partie {part_number}"}
+                        }
+                        messages_to_send.append({"embeds": [embed]})
+                        part_number += 1
+                else:
+                    embed = {
+                        "description": domain_text,
+                        "color": 0xff8800,
+                        "footer": {"text": f"CT Monitor - Partie {part_number}"}
+                    }
+                    messages_to_send.append({"embeds": [embed]})
+                    part_number += 1
+        
+        # ENVOYER TOUS LES MESSAGES
+        for i, payload in enumerate(messages_to_send):
+            try:
+                response = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+                response.raise_for_status()
+                
+                # Pause entre messages pour eviter rate limit Discord
+                if i < len(messages_to_send) - 1:
+                    time.sleep(1)
+                    
+            except Exception as e:
+                print(f"       [ERREUR] Discord message {i+1}: {str(e)[:100]}")
+                # Continuer meme si un message echoue
         
         with stats_lock:
             stats['alertes_envoyées'] += 1
             stats['dernière_alerte'] = datetime.utcnow()
         
-        print(f"       [ALERT] Discord: {len(unique_domains)} domaine(s)")
+        print(f"       [ALERT] Discord: {len(unique_domains)} domaines en {len(messages_to_send)} message(s)")
         
     except Exception as e:
         print(f"       [ERREUR] Discord: {str(e)[:100]}")
@@ -338,18 +391,15 @@ def monitor_log(log_config):
     log_url = log_config['url']
     priority = log_config.get('priority', 'MEDIUM')
     
-    # Init position
     if log_name not in stats['positions']:
         tree_size = get_sth(log_url, log_name)
         if tree_size:
-            # Demarrer 5000 entrees avant la fin pour avoir plus de chances
             stats['positions'][log_name] = max(0, tree_size - 5000)
             print(f"  [INIT] {log_name}: position {stats['positions'][log_name]:,} / {tree_size:,}")
         else:
             print(f"  [ERREUR] {log_name}: Impossible recuperer tree_size")
             return
     
-    # Recuperer taille actuelle
     tree_size = get_sth(log_url, log_name)
     if not tree_size:
         print(f"  [ERREUR] {log_name}: get_sth failed")
@@ -361,7 +411,6 @@ def monitor_log(log_config):
         print(f"  [OK] {log_name}: A jour ({current_pos:,} / {tree_size:,})")
         return
     
-    # Calculer backlog
     backlog = tree_size - current_pos
     
     with stats_lock:
@@ -369,7 +418,6 @@ def monitor_log(log_config):
         if backlog > stats['max_backlog_seen']:
             stats['max_backlog_seen'] = backlog
     
-    # Ajuster selon backlog
     if backlog > 10000:
         max_batches = 50
         batch_size = 400
@@ -385,7 +433,6 @@ def monitor_log(log_config):
         max_batches = MAX_BATCHES_PER_CYCLE
         batch_size = BATCH_SIZE
     
-    # TRAITER BACKLOG
     batches_processed = 0
     total_matches = []
     
@@ -401,7 +448,6 @@ def monitor_log(log_config):
         if not entries:
             break
         
-        # Parser certificats
         for entry in entries:
             with stats_lock:
                 stats['certificats_analysés'] += 1
@@ -434,12 +480,10 @@ def monitor_log(log_config):
         
         time.sleep(0.2)
     
-    # Alerte groupee
     if total_matches:
         print(f"  [MATCH] {log_name}: {len(total_matches)} match(es) trouve(s)")
         send_alert(total_matches, log_name)
     
-    # Stats finales
     final_backlog = tree_size - current_pos
     if final_backlog > 0:
         print(f"  [STATS] {log_name}: {batches_processed} batches, {final_backlog:,} certs restants")
