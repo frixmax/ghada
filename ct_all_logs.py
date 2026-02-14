@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Monitoring Certificate Transparency - VERSION ANTI-BACKLOG
-Optimise pour traiter tous les certificats sans accumulation de retard
+Monitoring Certificate Transparency - VERSION CORRIGEE AVEC PRECERT
+Gestion correcte des X509Entry ET PreCertificate
 """
 
 import requests
@@ -17,46 +17,33 @@ from cryptography.hazmat.backends import default_backend
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 print("=" * 80)
-print("MONITORING CT - VERSION ANTI-BACKLOG OPTIMISEE")
+print("MONITORING CT - VERSION CORRIGEE (X509 + PreCert)")
 print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print("=" * 80)
 
-# ==================== CONFIGURATION OPTIMISEE ====================
+# ==================== CONFIGURATION ====================
 PORT = int(os.environ.get('PORT', 10000))
 DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', 
     "https://discord.com/api/webhooks/1471764024797433872/WpHl_7qk5u9mocNYd2LbnFBp0qXbff3RXAIsrKVNXspSQJHJOp_e4_XhWOaq4jrSjKtS")
 DOMAINS_FILE = '/app/domains.txt'
 
-# PARAMETRES ANTI-BACKLOG (OPTIMISES)
-CHECK_INTERVAL = 45              # 45s (plus rapide)
-BATCH_SIZE = 400                 # Batches plus gros
-MAX_BATCHES_PER_CYCLE = 25       # Plus de batches par cycle
-PARALLEL_LOGS = 10               # Plus de parallelisme
-CACHE_MAX_SIZE = 200000          # Cache plus grand
-BACKLOG_WARNING_THRESHOLD = 500  # Alerte precoce
-TIMEOUT_PER_LOG = 180            # 3 minutes max par log
+# PARAMETRES OPTIMISES
+CHECK_INTERVAL = 60              # 60s
+BATCH_SIZE = 300                 # Batches moyens
+MAX_BATCHES_PER_CYCLE = 20       # 20 batches max
+PARALLEL_LOGS = 8                # 8 logs paralleles
+CACHE_MAX_SIZE = 200000          
+BACKLOG_WARNING_THRESHOLD = 1000
+TIMEOUT_PER_LOG = 180
 
-# Capacite theorique: 13 logs x 25 batches x 400 = 130,000 certs/cycle
-# 130,000 / 45s = 2,889 certs/seconde
-
-# LOGS ACTIFS - Top 6 uniquement pour performance maximale
+# LOGS ACTIFS - Top 6
 CT_LOGS = [
-    # TOP 6 - ULTRA ACTIFS SEULEMENT
     {"name": "Cloudflare Nimbus2025", "url": "https://ct.cloudflare.com/logs/nimbus2025", "enabled": True, "priority": "HIGH"},
     {"name": "Cloudflare Nimbus2026", "url": "https://ct.cloudflare.com/logs/nimbus2026", "enabled": True, "priority": "HIGH"},
     {"name": "Google Argon2025h2", "url": "https://ct.googleapis.com/logs/us1/argon2025h2", "enabled": True, "priority": "HIGH"},
     {"name": "Google Argon2024", "url": "https://ct.googleapis.com/logs/us1/argon2024", "enabled": True, "priority": "HIGH"},
     {"name": "Google Argon2026h1", "url": "https://ct.googleapis.com/logs/us1/argon2026h1", "enabled": True, "priority": "HIGH"},
     {"name": "Google Argon2025h1", "url": "https://ct.googleapis.com/logs/us1/argon2025h1", "enabled": True, "priority": "HIGH"},
-    
-    # DESACTIVE pour reduire la charge (reactiver une fois backlog sous controle)
-    {"name": "Google Argon2026h2", "url": "https://ct.googleapis.com/logs/us1/argon2026h2", "enabled": False, "priority": "MEDIUM"},
-    {"name": "Cloudflare Nimbus2027", "url": "https://ct.cloudflare.com/logs/nimbus2027", "enabled": False, "priority": "MEDIUM"},
-    {"name": "Google Solera2026h1", "url": "https://ct.googleapis.com/logs/eu1/solera2026h1", "enabled": False, "priority": "MEDIUM"},
-    {"name": "Google Solera2024", "url": "https://ct.googleapis.com/logs/eu1/solera2024", "enabled": False, "priority": "LOW"},
-    {"name": "Google Solera2025h2", "url": "https://ct.googleapis.com/logs/eu1/solera2025h2", "enabled": False, "priority": "LOW"},
-    {"name": "Google Solera2025h1", "url": "https://ct.googleapis.com/logs/eu1/solera2025h1", "enabled": False, "priority": "LOW"},
-    {"name": "Google Solera2026h2", "url": "https://ct.googleapis.com/logs/eu1/solera2026h2", "enabled": False, "priority": "LOW"},
 ]
 
 # ==================== STATS ====================
@@ -76,12 +63,11 @@ stats = {
     'batches_processed': 0,
     'max_backlog_seen': 0,
     'backlog_history': [],
+    'x509_count': 0,
+    'precert_count': 0,
 }
 
-# Cache anti-duplicates
 seen_certificates = set()
-
-# Lock pour thread-safety
 stats_lock = threading.Lock()
 
 # ==================== CHARGEMENT DOMAINES ====================
@@ -90,7 +76,7 @@ try:
         targets = {line.strip().lower() for line in f if line.strip() and not line.startswith('#')}
     print(f"[OK] {len(targets)} domaines charges")
     if targets:
-        print(f"     Premiers: {', '.join(list(targets)[:5])}")
+        print(f"     Exemples: {', '.join(list(targets)[:5])}")
 except Exception as e:
     print(f"[ERREUR] Chargement domaines: {e}")
     targets = set()
@@ -106,8 +92,6 @@ if "discord.com/api/webhooks" not in DISCORD_WEBHOOK:
 stats['logs_actifs'] = sum(1 for log in CT_LOGS if log['enabled'])
 print(f"[OK] {stats['logs_actifs']} logs CT actifs")
 print(f"[OK] Webhook Discord configure")
-print(f"[OK] Capacite: {MAX_BATCHES_PER_CYCLE} batches x {BATCH_SIZE} = {MAX_BATCHES_PER_CYCLE * BATCH_SIZE} certs max/log/cycle")
-print(f"[OK] Intervalle: {CHECK_INTERVAL}s entre cycles")
 print("=" * 80)
 
 # ==================== HTTP HEALTH CHECK ====================
@@ -123,7 +107,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             
             uptime = (datetime.utcnow() - stats['démarrage']).total_seconds()
             
-            # Calculer moyenne backlog sur 10 derniers cycles
             avg_backlog = 0
             if stats['backlog_history']:
                 recent = stats['backlog_history'][-10:]
@@ -134,6 +117,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 'uptime_seconds': int(uptime),
                 'uptime_human': f"{int(uptime//3600)}h {int((uptime%3600)//60)}m",
                 'certificats_analysés': stats['certificats_analysés'],
+                'x509_count': stats['x509_count'],
+                'precert_count': stats['precert_count'],
                 'matches_trouvés': stats['matches_trouvés'],
                 'alertes_envoyées': stats['alertes_envoyées'],
                 'duplicates_évités': stats['duplicates_évités'],
@@ -145,7 +130,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 'logs_actifs': stats['logs_actifs'],
                 'logs_en_erreur': stats['logs_en_erreur'],
                 'dernière_alerte': stats['dernière_alerte'].isoformat() if stats['dernière_alerte'] else None,
-                'dernière_vérification': stats['dernière_vérification'].isoformat() if stats['dernière_vérification'] else None,
                 'timestamp': datetime.utcnow().isoformat(),
                 'logs_positions': stats['positions']
             }
@@ -190,7 +174,6 @@ def get_entries(log_url, start, end):
             return response.json().get('entries', [])
         except Exception as e:
             if attempt == 2:
-                print(f"       [ERREUR] get_entries apres 3 tentatives: {str(e)[:50]}")
                 return []
             time.sleep(1)
     return []
@@ -203,21 +186,57 @@ def generate_cert_hash(entry):
         return None
 
 def parse_certificate(entry):
-    """Parse certificat X.509"""
+    """Parse certificat X.509 - VERSION CORRIGEE avec X509Entry ET PreCertificate"""
     try:
         leaf_bytes = base64.b64decode(entry.get('leaf_input', ''))
         
-        if len(leaf_bytes) < 15:
+        if len(leaf_bytes) < 12:
             return []
         
-        cert_length = int.from_bytes(leaf_bytes[11:14], 'big')
-        cert_start = 14
-        cert_end = cert_start + cert_length
+        # Lire LogEntryType (bytes 10-11, big-endian uint16)
+        # 0 = X509Entry
+        # 1 = PreCertificate
+        log_entry_type = int.from_bytes(leaf_bytes[10:12], 'big')
         
-        if cert_end > len(leaf_bytes):
+        cert_der = None
+        
+        if log_entry_type == 0:
+            # X509Entry - certificat complet dans leaf_input
+            with stats_lock:
+                stats['x509_count'] += 1
+            
+            if len(leaf_bytes) < 15:
+                return []
+            
+            # Lire la longueur du certificat (3 bytes)
+            cert_length = int.from_bytes(leaf_bytes[12:15], 'big')
+            cert_start = 15
+            cert_end = cert_start + cert_length
+            
+            if cert_end <= len(leaf_bytes):
+                cert_der = leaf_bytes[cert_start:cert_end]
+        
+        elif log_entry_type == 1:
+            # PreCertificate - certificat dans extra_data
+            with stats_lock:
+                stats['precert_count'] += 1
+            
+            try:
+                extra_data = base64.b64decode(entry.get('extra_data', ''))
+                if len(extra_data) > 3:
+                    # Les 3 premiers bytes = longueur du certificat
+                    cert_length = int.from_bytes(extra_data[0:3], 'big')
+                    if len(extra_data) >= 3 + cert_length:
+                        cert_der = extra_data[3:3+cert_length]
+            except:
+                pass
+        
+        if not cert_der:
+            with stats_lock:
+                stats['parse_errors'] += 1
             return []
         
-        cert_der = leaf_bytes[cert_start:cert_end]
+        # Parser le certificat X.509
         cert = x509.load_der_x509_certificate(cert_der, default_backend())
         
         all_domains = set()
@@ -230,7 +249,7 @@ def parse_certificate(entry):
         except:
             pass
         
-        # SANs
+        # SANs (Subject Alternative Names) - LE PLUS IMPORTANT
         try:
             san_ext = cert.extensions.get_extension_for_oid(
                 x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
@@ -245,6 +264,7 @@ def parse_certificate(entry):
         matched = []
         for domain in all_domains:
             for target in targets:
+                # Match exact ou sous-domaine
                 if domain == target or domain.endswith('.' + target):
                     matched.append(domain)
                     break
@@ -286,7 +306,7 @@ def send_alert(matched_domains, log_name):
             description += f"\n\n... et {len(description_parts)-30} lignes supplementaires"
         
         embed = {
-            "title": "[ALERTE] Nouveaux certificats SSL detectes",
+            "title": "[ALERTE] Nouveaux certificats SSL",
             "description": description,
             "color": 0xff0000,
             "fields": [
@@ -294,7 +314,7 @@ def send_alert(matched_domains, log_name):
                 {"name": "Domaines principaux", "value": str(len(by_base_domain)), "inline": True},
                 {"name": "Source", "value": log_name, "inline": True}
             ],
-            "footer": {"text": "CT Monitor - Anti-Backlog"},
+            "footer": {"text": "CT Monitor"},
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -313,7 +333,7 @@ def send_alert(matched_domains, log_name):
 
 # ==================== MONITORING CORE ====================
 def monitor_log(log_config):
-    """Surveille un log CT - VERSION ANTI-BACKLOG"""
+    """Surveille un log CT"""
     log_name = log_config['name']
     log_url = log_config['url']
     priority = log_config.get('priority', 'MEDIUM')
@@ -322,7 +342,8 @@ def monitor_log(log_config):
     if log_name not in stats['positions']:
         tree_size = get_sth(log_url, log_name)
         if tree_size:
-            stats['positions'][log_name] = max(0, tree_size - 1000)
+            # Demarrer 5000 entrees avant la fin pour avoir plus de chances
+            stats['positions'][log_name] = max(0, tree_size - 5000)
             print(f"  [INIT] {log_name}: position {stats['positions'][log_name]:,} / {tree_size:,}")
         else:
             print(f"  [ERREUR] {log_name}: Impossible recuperer tree_size")
@@ -348,23 +369,18 @@ def monitor_log(log_config):
         if backlog > stats['max_backlog_seen']:
             stats['max_backlog_seen'] = backlog
     
-    # MODE DYNAMIQUE selon backlog
-    if backlog > 20000:
-        max_batches = 100
-        batch_size = 500
-        print(f"  [URGENCE] {log_name}: Backlog {backlog:,} -> Mode Turbo Max ({max_batches} batches)")
-    elif backlog > 10000:
+    # Ajuster selon backlog
+    if backlog > 10000:
         max_batches = 50
-        batch_size = 450
-        print(f"  [TURBO] {log_name}: Backlog {backlog:,} -> Mode Accelere ({max_batches} batches)")
-    elif backlog > 5000:
-        max_batches = 35
         batch_size = 400
-        print(f"  [RAPIDE] {log_name}: Backlog {backlog:,} -> Mode Rapide ({max_batches} batches)")
+        print(f"  [TURBO] {log_name}: Backlog {backlog:,} -> Mode Accelere")
+    elif backlog > 5000:
+        max_batches = 30
+        batch_size = 350
     elif backlog > BACKLOG_WARNING_THRESHOLD:
         max_batches = MAX_BATCHES_PER_CYCLE
         batch_size = BATCH_SIZE
-        print(f"  [WARN] {log_name}: Backlog {backlog:,} -> Mode Normal ({max_batches} batches)")
+        print(f"  [WARN] {log_name}: Backlog {backlog:,}")
     else:
         max_batches = MAX_BATCHES_PER_CYCLE
         batch_size = BATCH_SIZE
@@ -377,13 +393,12 @@ def monitor_log(log_config):
         end_pos = min(current_pos + batch_size, tree_size)
         remaining = tree_size - end_pos
         
-        if batches_processed % 5 == 0:  # Log tous les 5 batches
+        if batches_processed % 5 == 0:
             print(f"  [SCAN] {log_name} [{batches_processed+1}/{max_batches}]: {current_pos:,} -> {end_pos-1:,} (reste: {remaining:,})")
         
         entries = get_entries(log_url, current_pos, end_pos - 1)
         
         if not entries:
-            print(f"       [WARN] Aucune entree, skip batch")
             break
         
         # Parser certificats
@@ -417,7 +432,7 @@ def monitor_log(log_config):
         with stats_lock:
             stats['batches_processed'] += 1
         
-        time.sleep(0.2)  # Petite pause
+        time.sleep(0.2)
     
     # Alerte groupee
     if total_matches:
@@ -427,7 +442,7 @@ def monitor_log(log_config):
     # Stats finales
     final_backlog = tree_size - current_pos
     if final_backlog > 0:
-        print(f"  [STATS] {log_name}: {batches_processed} batches traites, {final_backlog:,} certs restants")
+        print(f"  [STATS] {log_name}: {batches_processed} batches, {final_backlog:,} certs restants")
     
     return batches_processed
 
@@ -447,7 +462,7 @@ def monitor_all_logs_parallel():
                 batches = future.result(timeout=TIMEOUT_PER_LOG)
                 results[log_name] = batches if batches else 0
             except Exception as e:
-                print(f"  [ERREUR] {log_name}: Exception - {str(e)[:100]}")
+                print(f"  [ERREUR] {log_name}: {str(e)[:100]}")
                 results[log_name] = -1
     
     return results
@@ -457,9 +472,8 @@ http_thread = threading.Thread(target=start_http_server, daemon=True)
 http_thread.start()
 time.sleep(1)
 
-print(f"\n[START] Demarrage surveillance (intervalle: {CHECK_INTERVAL}s)")
-print(f"[START] {len(targets)} domaine(s) surveille(s)")
-print(f"[START] Parallelisation: {PARALLEL_LOGS} logs simultanes")
+print(f"\n[START] Surveillance (intervalle: {CHECK_INTERVAL}s)")
+print(f"[START] {len(targets)} domaine(s)")
 print("=" * 80)
 
 # ==================== MAIN LOOP ====================
@@ -478,21 +492,17 @@ while True:
         print(f"CYCLE #{cycle} - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print(f"{'='*80}")
         
-        # Traiter logs
         results = monitor_all_logs_parallel()
         
-        # Stats cycle
         cycle_duration = int(time.time() - cycle_start)
         successful_logs = sum(1 for v in results.values() if v >= 0)
-        total_batches_this_cycle = sum(v for v in results.values() if v > 0)
+        total_batches = sum(v for v in results.values() if v > 0)
         
-        # Historique backlog
         with stats_lock:
             stats['backlog_history'].append(stats['total_backlog'])
             if len(stats['backlog_history']) > 100:
                 stats['backlog_history'].pop(0)
         
-        # Tendance backlog
         backlog_trend = "STABLE"
         if len(stats['backlog_history']) >= 3:
             recent = stats['backlog_history'][-3:]
@@ -501,37 +511,41 @@ while True:
             elif recent[-1] < recent[0] * 0.8:
                 backlog_trend = "DIMINUE"
         
+        parse_success_rate = 0
+        if stats['certificats_analysés'] > 0:
+            parse_success_rate = 100 * (1 - stats['parse_errors'] / stats['certificats_analysés'])
+        
         print(f"\n{'='*80}")
         print(f"CYCLE #{cycle} TERMINE en {cycle_duration}s")
         print(f"  Logs traites: {successful_logs}/{len(results)}")
-        print(f"  Batches traites: {total_batches_this_cycle}")
-        print(f"  Certificats analyses (total): {stats['certificats_analysés']:,}")
-        print(f"  Matches trouves (total): {stats['matches_trouvés']}")
-        print(f"  Alertes envoyees (total): {stats['alertes_envoyées']}")
-        print(f"  Backlog actuel: {stats['total_backlog']:,} ({backlog_trend})")
-        print(f"  Max backlog vu: {stats['max_backlog_seen']:,}")
+        print(f"  Batches: {total_batches}")
+        print(f"  Certificats analyses: {stats['certificats_analysés']:,}")
+        print(f"    - X509Entry: {stats['x509_count']:,}")
+        print(f"    - PreCert: {stats['precert_count']:,}")
+        print(f"    - Parse success: {parse_success_rate:.1f}%")
+        print(f"  Matches trouves: {stats['matches_trouvés']}")
+        print(f"  Alertes envoyees: {stats['alertes_envoyées']}")
+        print(f"  Backlog: {stats['total_backlog']:,} ({backlog_trend})")
         print(f"{'='*80}")
         
-        # Alerte si backlog critique
         if stats['total_backlog'] > 50000:
-            print(f"\n[CRITIQUE] Backlog tres eleve ! Augmenter capacite ou desactiver logs.")
+            print(f"\n[CRITIQUE] Backlog tres eleve !")
         
         print(f"\n[WAIT] Attente {CHECK_INTERVAL}s avant cycle #{cycle+1}...")
         time.sleep(CHECK_INTERVAL)
         
     except KeyboardInterrupt:
-        print("\n\n[STOP] Arret demande par utilisateur")
+        print("\n\n[STOP] Arret demande")
         break
     except Exception as e:
         print(f"\n[ERREUR] GLOBALE: {e}")
         import traceback
         traceback.print_exc()
-        print("\n[PAUSE] Attente 60s avant retry...")
+        print("\n[PAUSE] 60s...")
         time.sleep(60)
 
 print("\n" + "="*80)
 print("ARRET DU MONITORING")
-print(f"Uptime: {int((datetime.utcnow() - stats['démarrage']).total_seconds() / 3600)}h")
 print(f"Certificats analyses: {stats['certificats_analysés']:,}")
 print(f"Alertes envoyees: {stats['alertes_envoyées']}")
 print("="*80)
