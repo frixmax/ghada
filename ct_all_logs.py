@@ -2,6 +2,7 @@
 """
 Monitoring Certificate Transparency - VERSION LISTE COMPLETE DISCORD
 Envoie la liste complete des domaines (meme si 300+)
+VERSION 13 LOGS - SURVEILLANCE MAXIMALE
 """
 
 import requests
@@ -17,7 +18,7 @@ from cryptography.hazmat.backends import default_backend
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 print("=" * 80)
-print("MONITORING CT - VERSION LISTE COMPLETE")
+print("MONITORING CT - VERSION LISTE COMPLETE - 13 LOGS ACTIFS")
 print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print("=" * 80)
 
@@ -27,23 +28,35 @@ DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK',
     "https://discord.com/api/webhooks/1471764024797433872/WpHl_7qk5u9mocNYd2LbnFBp0qXbff3RXAIsrKVNXspSQJHJOp_e4_XhWOaq4jrSjKtS")
 DOMAINS_FILE = '/app/domains.txt'
 
-# PARAMETRES OPTIMISES
+# PARAMETRES OPTIMISES POUR 13 LOGS
 CHECK_INTERVAL = 60
 BATCH_SIZE = 300
 MAX_BATCHES_PER_CYCLE = 20
-PARALLEL_LOGS = 8
+PARALLEL_LOGS = 13  # 13 logs en parallèle
 CACHE_MAX_SIZE = 200000
 BACKLOG_WARNING_THRESHOLD = 1000
 TIMEOUT_PER_LOG = 180
 
-# LOGS ACTIFS - Top 6
+# LOGS ACTIFS - TOP 13 COMPLETS
 CT_LOGS = [
-    {"name": "Cloudflare Nimbus2025", "url": "https://ct.cloudflare.com/logs/nimbus2025", "enabled": True, "priority": "HIGH"},
-    {"name": "Cloudflare Nimbus2026", "url": "https://ct.cloudflare.com/logs/nimbus2026", "enabled": True, "priority": "HIGH"},
-    {"name": "Google Argon2025h2", "url": "https://ct.googleapis.com/logs/us1/argon2025h2", "enabled": True, "priority": "HIGH"},
-    {"name": "Google Argon2024", "url": "https://ct.googleapis.com/logs/us1/argon2024", "enabled": True, "priority": "HIGH"},
-    {"name": "Google Argon2026h1", "url": "https://ct.googleapis.com/logs/us1/argon2026h1", "enabled": True, "priority": "HIGH"},
-    {"name": "Google Argon2025h1", "url": "https://ct.googleapis.com/logs/us1/argon2025h1", "enabled": True, "priority": "HIGH"},
+    # CLOUDFLARE (3 logs actifs) - PRIORITE MAXIMALE
+    {"name": "Cloudflare Nimbus2025", "url": "https://ct.cloudflare.com/logs/nimbus2025", "enabled": True, "priority": "CRITICAL"},
+    {"name": "Cloudflare Nimbus2026", "url": "https://ct.cloudflare.com/logs/nimbus2026", "enabled": True, "priority": "CRITICAL"},
+    {"name": "Cloudflare Nimbus2027", "url": "https://ct.cloudflare.com/logs/nimbus2027", "enabled": True, "priority": "HIGH"},
+    
+    # GOOGLE US ARGON (5 logs actifs) - TRES HAUT VOLUME
+    {"name": "Google Argon2024", "url": "https://ct.googleapis.com/logs/us1/argon2024", "enabled": True, "priority": "CRITICAL"},
+    {"name": "Google Argon2025h1", "url": "https://ct.googleapis.com/logs/us1/argon2025h1", "enabled": True, "priority": "CRITICAL"},
+    {"name": "Google Argon2025h2", "url": "https://ct.googleapis.com/logs/us1/argon2025h2", "enabled": True, "priority": "CRITICAL"},
+    {"name": "Google Argon2026h1", "url": "https://ct.googleapis.com/logs/us1/argon2026h1", "enabled": True, "priority": "CRITICAL"},
+    {"name": "Google Argon2026h2", "url": "https://ct.googleapis.com/logs/us1/argon2026h2", "enabled": True, "priority": "HIGH"},
+    
+    # GOOGLE EU SOLERA (5 logs actifs) - VOLUME EUROPEEN
+    {"name": "Google Solera2024", "url": "https://ct.googleapis.com/logs/eu1/solera2024", "enabled": True, "priority": "MEDIUM"},
+    {"name": "Google Solera2025h1", "url": "https://ct.googleapis.com/logs/eu1/solera2025h1", "enabled": True, "priority": "MEDIUM"},
+    {"name": "Google Solera2025h2", "url": "https://ct.googleapis.com/logs/eu1/solera2025h2", "enabled": True, "priority": "MEDIUM"},
+    {"name": "Google Solera2026h1", "url": "https://ct.googleapis.com/logs/eu1/solera2026h1", "enabled": True, "priority": "MEDIUM"},
+    {"name": "Google Solera2026h2", "url": "https://ct.googleapis.com/logs/eu1/solera2026h2", "enabled": True, "priority": "LOW"},
 ]
 
 # ==================== STATS ====================
@@ -65,6 +78,7 @@ stats = {
     'backlog_history': [],
     'x509_count': 0,
     'precert_count': 0,
+    'logs_stats': {},  # Stats par log
 }
 
 seen_certificates = set()
@@ -94,6 +108,18 @@ print(f"[OK] {stats['logs_actifs']} logs CT actifs")
 print(f"[OK] Webhook Discord configure")
 print("=" * 80)
 
+# Initialiser stats par log
+for log in CT_LOGS:
+    if log['enabled']:
+        stats['logs_stats'][log['name']] = {
+            'certs_processed': 0,
+            'matches_found': 0,
+            'errors': 0,
+            'last_position': 0,
+            'tree_size': 0,
+            'response_time_avg': 0
+        }
+
 # ==================== HTTP HEALTH CHECK ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -114,6 +140,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             
             status = {
                 'status': 'healthy',
+                'version': '13_LOGS_COMPLETE',
                 'uptime_seconds': int(uptime),
                 'uptime_human': f"{int(uptime//3600)}h {int((uptime%3600)//60)}m",
                 'certificats_analysés': stats['certificats_analysés'],
@@ -131,7 +158,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 'logs_en_erreur': stats['logs_en_erreur'],
                 'dernière_alerte': stats['dernière_alerte'].isoformat() if stats['dernière_alerte'] else None,
                 'timestamp': datetime.utcnow().isoformat(),
-                'logs_positions': stats['positions']
+                'logs_positions': stats['positions'],
+                'logs_stats': stats['logs_stats']
             }
             
             self.wfile.write(json.dumps(status, indent=2).encode())
@@ -148,17 +176,23 @@ def start_http_server():
 def get_sth(log_url, log_name):
     """Recupere le Signed Tree Head"""
     try:
+        start_time = time.time()
         response = requests.get(f"{log_url}/ct/v1/get-sth", timeout=10)
         response.raise_for_status()
+        response_time = time.time() - start_time
         
         with stats_lock:
             if log_name in stats['logs_en_erreur']:
                 del stats['logs_en_erreur'][log_name]
+            if log_name in stats['logs_stats']:
+                stats['logs_stats'][log_name]['response_time_avg'] = response_time
         
         return response.json()['tree_size']
     except Exception as e:
         with stats_lock:
             stats['logs_en_erreur'][log_name] = str(e)[:100]
+            if log_name in stats['logs_stats']:
+                stats['logs_stats'][log_name]['errors'] += 1
         return None
 
 def get_entries(log_url, start, end):
@@ -297,14 +331,14 @@ def send_alert(matched_domains, log_name):
         if len(full_text) <= MAX_LENGTH:
             # UN SEUL MESSAGE
             embed = {
-                "title": f"[ALERTE] {len(unique_domains)} nouveaux certificats SSL",
+                "title": f"🚨 [ALERTE] {len(unique_domains)} nouveaux certificats SSL",
                 "description": full_text,
                 "color": 0xff0000,
                 "fields": [
                     {"name": "Domaines principaux", "value": str(len(by_base_domain)), "inline": True},
                     {"name": "Source", "value": log_name, "inline": True}
                 ],
-                "footer": {"text": "CT Monitor"},
+                "footer": {"text": "CT Monitor - 13 Logs Actifs"},
                 "timestamp": datetime.utcnow().isoformat()
             }
             messages_to_send.append({"embeds": [embed]})
@@ -313,11 +347,11 @@ def send_alert(matched_domains, log_name):
             # PLUSIEURS MESSAGES
             # Message 1: Header avec resume
             header_embed = {
-                "title": f"[ALERTE] {len(unique_domains)} nouveaux certificats SSL",
+                "title": f"🚨 [ALERTE] {len(unique_domains)} nouveaux certificats SSL",
                 "description": f"**LISTE COMPLETE EN PLUSIEURS PARTIES**\n\nDomaines principaux detectes: {len(by_base_domain)}\nSource: {log_name}\n\n" + 
                                "\n".join([f"- **{base}**: {len(subs)} sous-domaines" for base, subs in sorted(by_base_domain.items())]),
                 "color": 0xff0000,
-                "footer": {"text": "CT Monitor - Partie 1"},
+                "footer": {"text": "CT Monitor - 13 Logs - Partie 1"},
                 "timestamp": datetime.utcnow().isoformat()
             }
             messages_to_send.append({"embeds": [header_embed]})
@@ -348,7 +382,7 @@ def send_alert(matched_domains, log_name):
                         embed = {
                             "description": chunk,
                             "color": 0xff8800,
-                            "footer": {"text": f"CT Monitor - Partie {part_number}"}
+                            "footer": {"text": f"CT Monitor - 13 Logs - Partie {part_number}"}
                         }
                         messages_to_send.append({"embeds": [embed]})
                         part_number += 1
@@ -356,7 +390,7 @@ def send_alert(matched_domains, log_name):
                     embed = {
                         "description": domain_text,
                         "color": 0xff8800,
-                        "footer": {"text": f"CT Monitor - Partie {part_number}"}
+                        "footer": {"text": f"CT Monitor - 13 Logs - Partie {part_number}"}
                     }
                     messages_to_send.append({"embeds": [embed]})
                     part_number += 1
@@ -395,6 +429,8 @@ def monitor_log(log_config):
         tree_size = get_sth(log_url, log_name)
         if tree_size:
             stats['positions'][log_name] = max(0, tree_size - 5000)
+            if log_name in stats['logs_stats']:
+                stats['logs_stats'][log_name]['tree_size'] = tree_size
             print(f"  [INIT] {log_name}: position {stats['positions'][log_name]:,} / {tree_size:,}")
         else:
             print(f"  [ERREUR] {log_name}: Impossible recuperer tree_size")
@@ -404,6 +440,9 @@ def monitor_log(log_config):
     if not tree_size:
         print(f"  [ERREUR] {log_name}: get_sth failed")
         return
+    
+    if log_name in stats['logs_stats']:
+        stats['logs_stats'][log_name]['tree_size'] = tree_size
     
     current_pos = stats['positions'][log_name]
     
@@ -418,20 +457,26 @@ def monitor_log(log_config):
         if backlog > stats['max_backlog_seen']:
             stats['max_backlog_seen'] = backlog
     
-    if backlog > 10000:
-        max_batches = 50
-        batch_size = 400
-        print(f"  [TURBO] {log_name}: Backlog {backlog:,} -> Mode Accelere")
-    elif backlog > 5000:
-        max_batches = 30
-        batch_size = 350
-    elif backlog > BACKLOG_WARNING_THRESHOLD:
+    # Ajustement dynamique selon priorité et backlog
+    if priority == "CRITICAL":
+        if backlog > 10000:
+            max_batches = 50
+            batch_size = 400
+        else:
+            max_batches = MAX_BATCHES_PER_CYCLE
+            batch_size = BATCH_SIZE
+    elif priority == "HIGH":
         max_batches = MAX_BATCHES_PER_CYCLE
         batch_size = BATCH_SIZE
+    elif priority == "MEDIUM":
+        max_batches = 15
+        batch_size = 250
+    else:  # LOW
+        max_batches = 10
+        batch_size = 200
+    
+    if backlog > BACKLOG_WARNING_THRESHOLD:
         print(f"  [WARN] {log_name}: Backlog {backlog:,}")
-    else:
-        max_batches = MAX_BATCHES_PER_CYCLE
-        batch_size = BATCH_SIZE
     
     batches_processed = 0
     total_matches = []
@@ -451,6 +496,8 @@ def monitor_log(log_config):
         for entry in entries:
             with stats_lock:
                 stats['certificats_analysés'] += 1
+                if log_name in stats['logs_stats']:
+                    stats['logs_stats'][log_name]['certs_processed'] += 1
             
             cert_hash = generate_cert_hash(entry)
             if cert_hash:
@@ -469,10 +516,14 @@ def monitor_log(log_config):
             if matched:
                 with stats_lock:
                     stats['matches_trouvés'] += len(matched)
+                    if log_name in stats['logs_stats']:
+                        stats['logs_stats'][log_name]['matches_found'] += len(matched)
                 total_matches.extend(matched)
         
         current_pos = end_pos
         stats['positions'][log_name] = current_pos
+        if log_name in stats['logs_stats']:
+            stats['logs_stats'][log_name]['last_position'] = current_pos
         batches_processed += 1
         
         with stats_lock:
@@ -516,8 +567,9 @@ http_thread = threading.Thread(target=start_http_server, daemon=True)
 http_thread.start()
 time.sleep(1)
 
-print(f"\n[START] Surveillance (intervalle: {CHECK_INTERVAL}s)")
+print(f"\n[START] Surveillance avec 13 LOGS ACTIFS (intervalle: {CHECK_INTERVAL}s)")
 print(f"[START] {len(targets)} domaine(s)")
+print(f"[START] Cloudflare: 3 logs | Google US: 5 logs | Google EU: 5 logs")
 print("=" * 80)
 
 # ==================== MAIN LOOP ====================
@@ -551,9 +603,9 @@ while True:
         if len(stats['backlog_history']) >= 3:
             recent = stats['backlog_history'][-3:]
             if recent[-1] > recent[0] * 1.2:
-                backlog_trend = "AUGMENTE"
+                backlog_trend = "AUGMENTE ⬆️"
             elif recent[-1] < recent[0] * 0.8:
-                backlog_trend = "DIMINUE"
+                backlog_trend = "DIMINUE ⬇️"
         
         parse_success_rate = 0
         if stats['certificats_analysés'] > 0:
@@ -572,8 +624,19 @@ while True:
         print(f"  Backlog: {stats['total_backlog']:,} ({backlog_trend})")
         print(f"{'='*80}")
         
+        # Stats détaillées par log (top 5)
+        if stats['logs_stats']:
+            print(f"\n[TOP 5 LOGS - MATCHES]")
+            sorted_logs = sorted(stats['logs_stats'].items(), 
+                               key=lambda x: x[1]['matches_found'], 
+                               reverse=True)[:5]
+            for log_name, log_stat in sorted_logs:
+                print(f"  {log_name}: {log_stat['matches_found']} matches, "
+                      f"{log_stat['certs_processed']:,} certs, "
+                      f"pos: {log_stat['last_position']:,}/{log_stat['tree_size']:,}")
+        
         if stats['total_backlog'] > 50000:
-            print(f"\n[CRITIQUE] Backlog tres eleve !")
+            print(f"\n⚠️ [CRITIQUE] Backlog tres eleve !")
         
         print(f"\n[WAIT] Attente {CHECK_INTERVAL}s avant cycle #{cycle+1}...")
         time.sleep(CHECK_INTERVAL)
@@ -589,7 +652,7 @@ while True:
         time.sleep(60)
 
 print("\n" + "="*80)
-print("ARRET DU MONITORING")
+print("ARRET DU MONITORING - 13 LOGS")
 print(f"Certificats analyses: {stats['certificats_analysés']:,}")
 print(f"Alertes envoyees: {stats['alertes_envoyées']}")
 print("="*80)
