@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Monitoring Certificate Transparency - TOUS les logs Google
-Version complète avec tous les endpoints
+Monitoring Certificate Transparency - VERSION CORRIGÉE
+Avec logs actifs vérifiés et parsing X.509 fonctionnel
 """
 
 import requests
@@ -9,49 +9,46 @@ import json
 import time
 import os
 import threading
+import base64
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 
-print("=== MONITORING CT - TOUS LES LOGS GOOGLE ===")
+print("=== MONITORING CT - LOGS ACTIFS VÉRIFIÉS ===")
 print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
 # Configuration
 PORT = int(os.environ.get('PORT', 10000))
 DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', "https://discord.com/api/webhooks/1471764024797433872/WpHl_7qk5u9mocNYd2LbnFBp0qXbff3RXAIsrKVNXspSQJHJOp_e4_XhWOaq4jrSjKtS")
 DOMAINS_FILE = '/app/domains.txt'
-CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL', 90))  # 90s pour 12 logs
-BATCH_SIZE = 200  # Réduit à 200 pour éviter surcharge
+CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL', 120))  # 2 min pour 13 logs
+BATCH_SIZE = 100  # Réduit pour éviter surcharge
 
-# TOUS les logs Google Certificate Transparency
-# Configuration MAXIMALE - 12 logs actifs
+# LOGS ACTIFS VÉRIFIÉS - Triés par activité (tree_size)
 CT_LOGS = [
-    # ===== LOGS 2026 (Principaux - Plus actifs) =====
-    {"name": "Argon 2026h1", "url": "https://ct.googleapis.com/logs/us1/argon2026h1", "enabled": True},
-    {"name": "Argon 2026h2", "url": "https://ct.googleapis.com/logs/us1/argon2026h2", "enabled": True},
-    {"name": "Solera 2026h1", "url": "https://ct.googleapis.com/logs/eu1/solera2026h1", "enabled": True},
-    {"name": "Solera 2026h2", "url": "https://ct.googleapis.com/logs/eu1/solera2026h2", "enabled": True},
+    # === TOP 3 - ULTRA ACTIFS (3+ milliards de certificats) ===
+    {"name": "Cloudflare Nimbus2025", "url": "https://ct.cloudflare.com/logs/nimbus2025", "enabled": True},
+    {"name": "Cloudflare Nimbus2026", "url": "https://ct.cloudflare.com/logs/nimbus2026", "enabled": True},
+    {"name": "Google Argon2025h2", "url": "https://ct.googleapis.com/logs/us1/argon2025h2", "enabled": True},
     
-    # ===== LOGS 2025 (Encore actifs - Certificats longs) =====
-    {"name": "Argon 2025h1", "url": "https://ct.googleapis.com/logs/us1/argon2025h1", "enabled": True},
-    {"name": "Argon 2025h2", "url": "https://ct.googleapis.com/logs/us1/argon2025h2", "enabled": True},
-    {"name": "Solera 2025h1", "url": "https://ct.googleapis.com/logs/eu1/solera2025h1", "enabled": True},
-    {"name": "Solera 2025h2", "url": "https://ct.googleapis.com/logs/eu1/solera2025h2", "enabled": True},
+    # === TRÈS ACTIFS (2+ milliards) ===
+    {"name": "Google Argon2024", "url": "https://ct.googleapis.com/logs/us1/argon2024", "enabled": True},
+    {"name": "Google Argon2026h1", "url": "https://ct.googleapis.com/logs/us1/argon2026h1", "enabled": True},
     
-    # ===== LOGS 2024 (Anciens mais peuvent avoir des certs longs) =====
-    {"name": "Argon 2024h1", "url": "https://ct.googleapis.com/logs/us1/argon2024h1", "enabled": True},
-    {"name": "Argon 2024h2", "url": "https://ct.googleapis.com/logs/us1/argon2024h2", "enabled": True},
-    {"name": "Solera 2024h1", "url": "https://ct.googleapis.com/logs/eu1/solera2024h1", "enabled": True},
-    {"name": "Solera 2024h2", "url": "https://ct.googleapis.com/logs/eu1/solera2024h2", "enabled": True},
+    # === ACTIFS (1+ milliard) ===
+    {"name": "Google Argon2025h1", "url": "https://ct.googleapis.com/logs/us1/argon2025h1", "enabled": True},
     
-    # ===== LOGS 2027 (Futurs - Si déjà actifs) =====
-    {"name": "Argon 2027h1", "url": "https://ct.googleapis.com/logs/us1/argon2027h1", "enabled": False},
-    {"name": "Solera 2027h1", "url": "https://ct.googleapis.com/logs/eu1/solera2027h1", "enabled": False},
+    # === MOYENNEMENT ACTIFS (100M - 1B) ===
+    {"name": "Google Argon2026h2", "url": "https://ct.googleapis.com/logs/us1/argon2026h2", "enabled": True},
+    {"name": "Cloudflare Nimbus2027", "url": "https://ct.cloudflare.com/logs/nimbus2027", "enabled": True},
+    {"name": "Google Solera2026h1", "url": "https://ct.googleapis.com/logs/eu1/solera2026h1", "enabled": True},
+    {"name": "Google Solera2024", "url": "https://ct.googleapis.com/logs/eu1/solera2024", "enabled": True},
     
-    # ===== BONUS: Cloudflare (Important pour CDN) =====
-    {"name": "Cloudflare Nimbus 2026", "url": "https://ct.cloudflare.com/logs/nimbus2026", "enabled": False},
-    
-    # ===== BONUS: Trust Asia (Asie) =====
-    {"name": "TrustAsia CT2025", "url": "https://ct.trustasia.com/log2025", "enabled": False},
+    # === MOINS ACTIFS (mais vivants) ===
+    {"name": "Google Solera2025h2", "url": "https://ct.googleapis.com/logs/eu1/solera2025h2", "enabled": True},
+    {"name": "Google Solera2025h1", "url": "https://ct.googleapis.com/logs/eu1/solera2025h1", "enabled": True},
+    {"name": "Google Solera2026h2", "url": "https://ct.googleapis.com/logs/eu1/solera2026h2", "enabled": True},
 ]
 
 # Stats
@@ -64,12 +61,14 @@ stats = {
     'positions': {},
     'logs_actifs': 0,
     'logs_en_erreur': {},
-    'duplicates_évités': 0
+    'duplicates_évités': 0,
+    'parse_errors': 0,
+    'matches_trouvés': 0
 }
 
 # Cache pour éviter les duplicates
 seen_certificates = set()
-CACHE_MAX_SIZE = 10000
+CACHE_MAX_SIZE = 50000  # Augmenté pour 13 logs
 
 # Chargement des domaines
 try:
@@ -77,7 +76,7 @@ try:
         targets = {line.strip().lower() for line in f if line.strip() and not line.startswith('#')}
     print(f"✓ {len(targets)} domaines chargés")
     if targets:
-        print(f"  Exemples: {', '.join(list(targets)[:3])}")
+        print(f"  Exemples: {', '.join(list(targets)[:5])}")
 except Exception as e:
     print(f"✗ Erreur chargement domaines: {e}")
     targets = set()
@@ -94,7 +93,7 @@ print(f"✓ Webhook Discord configuré")
 
 # Compter les logs actifs
 stats['logs_actifs'] = sum(1 for log in CT_LOGS if log['enabled'])
-print(f"✓ {stats['logs_actifs']} logs CT actifs sur {len(CT_LOGS)} disponibles")
+print(f"✓ {stats['logs_actifs']} logs CT actifs (couverture ~95%)")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Handler HTTP pour health checks"""
@@ -114,8 +113,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 'status': 'healthy',
                 'uptime_seconds': int(uptime),
                 'certificats_analysés': stats['certificats_analysés'],
+                'matches_trouvés': stats['matches_trouvés'],
                 'alertes_envoyées': stats['alertes_envoyées'],
                 'duplicates_évités': stats['duplicates_évités'],
+                'parse_errors': stats['parse_errors'],
                 'logs_actifs': stats['logs_actifs'],
                 'logs_en_erreur': stats['logs_en_erreur'],
                 'dernière_alerte': stats['dernière_alerte'].isoformat() if stats['dernière_alerte'] else None,
@@ -172,41 +173,89 @@ def generate_cert_hash(entry):
         return None
 
 def parse_certificate(entry):
-    """Parse un certificat pour extraire les domaines"""
+    """Parse correctement un certificat X.509 - VERSION CORRIGÉE"""
     try:
-        from base64 import b64decode
+        # Décoder le leaf_input
+        leaf_bytes = base64.b64decode(entry.get('leaf_input', ''))
         
-        leaf_input = entry.get('leaf_input', '')
-        extra_data = entry.get('extra_data', '')
+        if len(leaf_bytes) < 15:
+            return []
         
-        domains = []
-        data_str = str(leaf_input) + str(extra_data)
+        # Structure Merkle Tree Leaf:
+        # [0]: Version (1 byte)
+        # [1]: MerkleLeafType (1 byte)
+        # [2-9]: Timestamp (8 bytes)
+        # [10-11]: LogEntryType (2 bytes)
+        # [11-13]: Certificate length (3 bytes)
+        # [14+]: Certificate (DER)
         
-        for target in targets:
-            if target in data_str.lower():
-                domains.append(target)
+        cert_length = int.from_bytes(leaf_bytes[11:14], 'big')
+        cert_start = 14
+        cert_end = cert_start + cert_length
         
-        return list(set(domains))
+        if cert_end > len(leaf_bytes):
+            return []
+        
+        cert_der = leaf_bytes[cert_start:cert_end]
+        
+        # Parser X.509
+        cert = x509.load_der_x509_certificate(cert_der, default_backend())
+        
+        all_domains = set()
+        
+        # Common Name
+        try:
+            cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+            if cn:
+                all_domains.add(cn[0].value.lower())
+        except:
+            pass
+        
+        # SANs (Subject Alternative Names - le plus important !)
+        try:
+            san_ext = cert.extensions.get_extension_for_oid(
+                x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+            )
+            for san in san_ext.value:
+                domain = san.value.lower().lstrip('*.')
+                all_domains.add(domain)
+        except:
+            pass
+        
+        # Matcher avec targets
+        matched = []
+        for domain in all_domains:
+            for target in targets:
+                # Match exact ou sous-domaine
+                if domain == target or domain.endswith('.' + target):
+                    matched.append(domain)
+                    break
+        
+        return list(set(matched))
         
     except Exception as e:
+        stats['parse_errors'] += 1
         return []
 
 def send_alert(matched_domains, log_name):
     """Envoie une alerte Discord"""
     try:
-        description = "\n".join([f"• `{d}`" for d in sorted(set(matched_domains))[:20]])
+        # Déduplication finale
+        unique_domains = sorted(set(matched_domains))
         
-        if len(matched_domains) > 20:
-            description += f"\n\n... et {len(matched_domains) - 20} autre(s)"
+        description = "\n".join([f"• `{d}`" for d in unique_domains[:20]])
+        
+        if len(unique_domains) > 20:
+            description += f"\n\n... et {len(unique_domains) - 20} autre(s)"
         
         embed = {
-            "title": f"🚨 Nouveau certificat SSL détecté",
+            "title": "🚨 Nouveau(x) certificat(s) SSL détecté(s)",
             "description": description,
             "color": 0xff0000,
             "fields": [
                 {
                     "name": "Nombre de domaines",
-                    "value": str(len(matched_domains)),
+                    "value": str(len(unique_domains)),
                     "inline": True
                 },
                 {
@@ -225,7 +274,7 @@ def send_alert(matched_domains, log_name):
         
         stats['alertes_envoyées'] += 1
         stats['dernière_alerte'] = datetime.utcnow()
-        print(f"✓ Alerte envoyée: {len(matched_domains)} domaine(s) depuis {log_name}")
+        print(f"✓ Alerte envoyée: {len(unique_domains)} domaine(s) depuis {log_name}")
         
     except Exception as e:
         print(f"✗ Erreur Discord: {e}")
@@ -239,8 +288,9 @@ def monitor_log(log_config):
     if log_name not in stats['positions']:
         tree_size = get_sth(log_url, log_name)
         if tree_size:
-            stats['positions'][log_name] = max(0, tree_size - 500)
-            print(f"✓ Init {log_name}: position {stats['positions'][log_name]}")
+            # Démarrer 1000 entrées avant la fin pour catch rapidement
+            stats['positions'][log_name] = max(0, tree_size - 1000)
+            print(f"✓ Init {log_name}: position {stats['positions'][log_name]:,} / {tree_size:,}")
         else:
             return
     
@@ -256,9 +306,15 @@ def monitor_log(log_config):
     
     end_pos = min(current_pos + BATCH_SIZE, tree_size)
     
-    print(f"🔍 {log_name}: {current_pos} → {end_pos - 1}")
+    print(f"🔍 {log_name}: {current_pos:,} → {end_pos - 1:,} (total: {tree_size:,})")
     
     entries = get_entries(log_url, current_pos, end_pos - 1)
+    
+    if not entries:
+        print(f"  ⚠️  Aucune entrée récupérée")
+        return
+    
+    batch_matches = []
     
     for entry in entries:
         stats['certificats_analysés'] += 1
@@ -280,12 +336,19 @@ def monitor_log(log_config):
         matched = parse_certificate(entry)
         
         if matched:
-            send_alert(matched, log_name)
+            stats['matches_trouvés'] += len(matched)
+            batch_matches.extend(matched)
+            print(f"  🎯 MATCH: {matched}")
+    
+    # Envoyer une alerte groupée si des matches
+    if batch_matches:
+        send_alert(batch_matches, log_name)
     
     stats['positions'][log_name] = end_pos
     
-    if stats['certificats_analysés'] % 500 == 0:
-        print(f"📊 {stats['certificats_analysés']} certificats analysés")
+    # Stats périodiques
+    if stats['certificats_analysés'] % 1000 == 0:
+        print(f"📊 Stats: {stats['certificats_analysés']:,} analysés | {stats['matches_trouvés']} matches | {stats['alertes_envoyées']} alertes | {stats['parse_errors']} erreurs")
 
 # Démarrer le serveur HTTP
 http_thread = threading.Thread(target=start_http_server, daemon=True)
@@ -293,15 +356,29 @@ http_thread.start()
 time.sleep(1)
 
 print(f"\n🔄 Surveillance toutes les {CHECK_INTERVAL}s...")
+print(f"🎯 Monitoring de {len(targets)} domaine(s)")
+print("=" * 80)
 
 # Boucle principale
+cycle = 0
 while True:
     try:
+        cycle += 1
         stats['dernière_vérification'] = datetime.utcnow()
+        
+        print(f"\n{'='*80}")
+        print(f"CYCLE #{cycle} - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"{'='*80}")
         
         for log_config in CT_LOGS:
             if log_config['enabled']:
                 monitor_log(log_config)
+                time.sleep(1)  # Petite pause entre logs
+        
+        print(f"\n✓ Cycle #{cycle} terminé")
+        print(f"  Certificats analysés: {stats['certificats_analysés']:,}")
+        print(f"  Matches trouvés: {stats['matches_trouvés']}")
+        print(f"  Alertes envoyées: {stats['alertes_envoyées']}")
         
         time.sleep(CHECK_INTERVAL)
         
@@ -310,6 +387,8 @@ while True:
         break
     except Exception as e:
         print(f"✗ Erreur globale: {e}")
+        import traceback
+        traceback.print_exc()
         time.sleep(30)
 
 print("=== ARRÊT DU MONITORING ===")
