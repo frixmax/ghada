@@ -25,7 +25,7 @@ print("=" * 80)
 # ==================== CONFIGURATION ====================
 PORT = int(os.environ.get('PORT', 10000))
 DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK', 
-    "https://discord.com/api/webhooks/1471764024797433872/WpHl_7qk5u9mocNYd2LbnFBp0qXbff3RXAIsrKVNXspSQJHJOp_e4_XhWOaq4jrSjKtS")
+    "https://discord.com/api/webhooks/1472487929862684703/a4vMYqiwQO6c1VLRXNpv4w09kC2yTq-Rtdm4VkEBjsca6hfKZ6ARalPq4dvpTYoYHniu")
 DOMAINS_FILE = '/app/domains.txt'
 
 # PARAMETRES OPTIMISES POUR 13 LOGS
